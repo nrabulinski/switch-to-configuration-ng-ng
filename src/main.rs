@@ -2,7 +2,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     ffi::OsStr,
-    fs::read_dir,
+    fs::{read_dir, read_to_string, File},
     io::{BufRead, Read, Write},
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
@@ -117,7 +117,7 @@ fn die() -> ! {
 }
 
 fn parse_os_release() -> Result<HashMap<String, String>> {
-    Ok(std::fs::read_to_string("/etc/os-release")
+    Ok(read_to_string("/etc/os-release")
         .context("Failed to read /etc/os-release")?
         .lines()
         .filter_map(|line| line.split_once('='))
@@ -204,7 +204,7 @@ fn get_active_units(
 // override files.
 fn parse_systemd_ini(data: &mut UnitInfo, mut unit_file: impl Read) -> Result<()> {
     let mut unit_file_content = String::new();
-    _ = unit_file
+    unit_file
         .read_to_string(&mut unit_file_content)
         .context("Failed to read unit file")?;
 
@@ -261,7 +261,9 @@ fn parse_systemd_ini(data: &mut UnitInfo, mut unit_file: impl Read) -> Result<()
 
             match (section_map.get_mut(ini_key), clear_existing) {
                 (Some(existing_vals), false) => existing_vals.extend(new_vals),
-                _ => _ = section_map.insert(ini_key.to_string(), new_vals),
+                _ => {
+                    section_map.insert(ini_key.to_string(), new_vals);
+                }
             };
         }
     }
@@ -285,7 +287,7 @@ fn parse_unit(unit_file: &Path, base_unit_path: &Path) -> Result<UnitInfo> {
     // Parse the main unit and all overrides
     let mut unit_data = HashMap::new();
 
-    let base_unit_file = std::fs::File::open(base_unit_path)
+    let base_unit_file = File::open(base_unit_path)
         .with_context(|| format!("Failed to open unit file {}", base_unit_path.display()))?;
     parse_systemd_ini(&mut unit_data, base_unit_file).with_context(|| {
         format!(
@@ -295,7 +297,7 @@ fn parse_unit(unit_file: &Path, base_unit_path: &Path) -> Result<UnitInfo> {
     })?;
 
     for entry in get_unit_dir_entries(base_unit_path)? {
-        let unit_file = std::fs::File::open(&entry)
+        let unit_file = File::open(&entry)
             .with_context(|| format!("Failed to open unit file {}", entry.display()))?;
         parse_systemd_ini(&mut unit_data, unit_file)?;
     }
@@ -303,7 +305,7 @@ fn parse_unit(unit_file: &Path, base_unit_path: &Path) -> Result<UnitInfo> {
     // Handle drop-in template-unit instance overrides
     if unit_file != base_unit_path {
         for entry in get_unit_dir_entries(unit_file)? {
-            let unit_file = std::fs::File::open(&entry)
+            let unit_file = File::open(&entry)
                 .with_context(|| format!("Failed to open unit file {}", entry.display()))?;
             parse_systemd_ini(&mut unit_data, unit_file)?;
         }
@@ -641,8 +643,8 @@ fn handle_modified_unit(
 // nothing when the action is dry-activate.
 fn record_unit(p: impl AsRef<Path>, unit: &str) {
     if ACTION.get() != Some(&Action::DryActivate) {
-        if let Ok(mut f) = std::fs::File::options().append(true).create(true).open(p) {
-            _ = writeln!(&mut f, "{unit}");
+        if let Ok(mut f) = File::options().append(true).create(true).open(p) {
+            writeln!(&mut f, "{unit}").ok();
         }
     }
 }
@@ -650,24 +652,18 @@ fn record_unit(p: impl AsRef<Path>, unit: &str) {
 // The opposite of record_unit, removes a unit name from a file
 fn unrecord_unit(p: impl AsRef<Path>, unit: &str) {
     if ACTION.get() != Some(&Action::DryActivate) {
-        if let Ok(contents) = std::fs::read_to_string(&p) {
-            if let Ok(mut f) = std::fs::File::options()
-                .write(true)
-                .truncate(true)
-                .create(true)
-                .open(&p)
-            {
-                contents
-                    .lines()
-                    .filter(|line| line != &unit)
-                    .for_each(|line| _ = writeln!(&mut f, "{line}"))
-            }
+        let Ok(contents) = read_to_string(&p) else {
+            return;
+        };
+        let Ok(mut f) = File::create(&p) else { return };
+        for line in contents.lines().filter(|&line| line != unit) {
+            writeln!(f, "{line}").ok();
         }
     }
 }
 
 fn map_from_list_file(p: impl AsRef<Path>) -> HashSet<String> {
-    std::fs::read_to_string(p)
+    read_to_string(p)
         .unwrap_or_default()
         .lines()
         .filter(|&line| (!line.is_empty()))
@@ -820,7 +816,7 @@ fn block_on_jobs(
     submitted_jobs: &Rc<RefCell<HashMap<dbus::Path<'static>, Job>>>,
 ) {
     while !submitted_jobs.borrow().is_empty() {
-        _ = conn.process(Duration::from_millis(500));
+        conn.process(Duration::from_millis(500)).ok();
     }
 }
 
@@ -866,14 +862,14 @@ fn do_user_switch(parent_exe: String) -> anyhow::Result<()> {
 
     // The systemd user session seems to not send a Reloaded signal, so we don't have anything to
     // wait on here.
-    _ = systemd.reexecute();
+    systemd.reexecute().ok();
 
     systemd
         .restart_unit("nixos-activation.service", "replace")
         .context("Failed to restart nixos-activation.service")?;
 
     while !*nixos_activation_done.borrow() {
-        _ = dbus_conn
+        dbus_conn
             .process(Duration::from_secs(500))
             .context("Failed to process dbus messages")?;
     }
@@ -988,11 +984,10 @@ dry-activate: show what would be done if this configuration were activated
     }
 
     let current_init_interface_version =
-        std::fs::read_to_string("/run/current-system/init-interface-version").unwrap_or_default();
+        read_to_string("/run/current-system/init-interface-version").unwrap_or_default();
 
-    let new_init_interface_version =
-        std::fs::read_to_string(toplevel.join("init-interface-version"))
-            .context("File init-interface-version should exist")?;
+    let new_init_interface_version = read_to_string(toplevel.join("init-interface-version"))
+        .context("File init-interface-version should exist")?;
 
     // Check if we can activate the new configuration.
     if current_init_interface_version != new_init_interface_version {
@@ -1039,9 +1034,9 @@ won't take effect until you reboot the system.
         match system_state.as_str() {
             "running" | "degraded" | "maintenance" => break,
             _ => {
-                _ = dbus_conn
+                dbus_conn
                     .process(Duration::from_millis(500))
-                    .context("Failed to process dbus messages")?
+                    .context("Failed to process dbus messages")?;
             }
         }
     }
@@ -1125,7 +1120,7 @@ won't take effect until you reboot the system.
             {
                 let current_unit_info = parse_unit(&current_unit_file, &current_base_unit_file)?;
                 if parse_systemd_bool(Some(&current_unit_info), "Unit", "X-StopOnRemoval", true) {
-                    _ = units_to_stop.insert(unit.to_string());
+                    units_to_stop.insert(unit.to_string());
                 }
             } else if unit.ends_with(".target") {
                 let new_unit_info = parse_unit(&new_unit_file, &new_base_unit_file)?;
@@ -1206,10 +1201,10 @@ won't take effect until you reboot the system.
     // be unmounted. New filesystems are mounted automatically by starting local-fs.target.
     // FIXME: might be nicer if we generated units for all mounts; then we could unify this with
     // the unit checking code above.
-    let (current_filesystems, current_swaps) = std::fs::read_to_string("/etc/fstab")
+    let (current_filesystems, current_swaps) = read_to_string("/etc/fstab")
         .map(|fstab| parse_fstab(std::io::Cursor::new(fstab)))
         .unwrap_or_default();
-    let (new_filesystems, new_swaps) = std::fs::read_to_string(toplevel.join("etc/fstab"))
+    let (new_filesystems, new_swaps) = read_to_string(toplevel.join("etc/fstab"))
         .map(|fstab| parse_fstab(std::io::Cursor::new(fstab)))
         .unwrap_or_default();
 
@@ -1303,13 +1298,14 @@ won't take effect until you reboot the system.
         }
 
         eprintln!("would activate the configuration...");
-        _ = std::process::Command::new(out.join("dry-activate"))
+        std::process::Command::new(out.join("dry-activate"))
             .arg(&out)
             .spawn()
-            .map(|mut child| child.wait());
+            .map(|mut child| child.wait())
+            .ok();
 
         // Handle the activation script requesting the restart or reload of a unit.
-        for unit in std::fs::read_to_string(DRY_RESTART_BY_ACTIVATION_LIST_FILE)
+        for unit in read_to_string(DRY_RESTART_BY_ACTIVATION_LIST_FILE)
             .unwrap_or_default()
             .lines()
         {
@@ -1366,7 +1362,7 @@ won't take effect until you reboot the system.
         remove_file_if_exists(DRY_RESTART_BY_ACTIVATION_LIST_FILE)
             .with_context(|| format!("Failed to remove {}", DRY_RESTART_BY_ACTIVATION_LIST_FILE))?;
 
-        for unit in std::fs::read_to_string(DRY_RELOAD_BY_ACTIVATION_LIST_FILE)
+        for unit in read_to_string(DRY_RELOAD_BY_ACTIVATION_LIST_FILE)
             .unwrap_or_default()
             .lines()
         {
@@ -1462,7 +1458,7 @@ won't take effect until you reboot the system.
     }
 
     // Handle the activation script requesting the restart or reload of a unit.
-    for unit in std::fs::read_to_string(RESTART_BY_ACTIVATION_LIST_FILE)
+    for unit in read_to_string(RESTART_BY_ACTIVATION_LIST_FILE)
         .unwrap_or_default()
         .lines()
     {
@@ -1520,7 +1516,7 @@ won't take effect until you reboot the system.
     remove_file_if_exists(RESTART_BY_ACTIVATION_LIST_FILE)
         .with_context(|| format!("Failed to remove {}", RESTART_BY_ACTIVATION_LIST_FILE))?;
 
-    for unit in std::fs::read_to_string(RELOAD_BY_ACTIVATION_LIST_FILE)
+    for unit in read_to_string(RELOAD_BY_ACTIVATION_LIST_FILE)
         .unwrap_or_default()
         .lines()
     {
@@ -1541,10 +1537,10 @@ won't take effect until you reboot the system.
     // just in case the new one has trouble communicating with the running pid 1.
     if restart_systemd {
         eprintln!("restarting systemd...");
-        _ = systemd.reexecute(); // we don't get a dbus reply here
+        systemd.reexecute().ok(); // we don't get a dbus reply here
 
         while !*systemd_reload_status.borrow() {
-            _ = dbus_conn
+            dbus_conn
                 .process(Duration::from_millis(500))
                 .context("Failed to process dbus messages")?;
         }
@@ -1556,9 +1552,9 @@ won't take effect until you reboot the system.
         .context("Failed to reset failed units")?;
 
     // Make systemd reload its units.
-    _ = systemd.reload(); // we don't get a dbus reply here
+    systemd.reload().ok(); // we don't get a dbus reply here
     while !*systemd_reload_status.borrow() {
-        _ = dbus_conn
+        dbus_conn
             .process(Duration::from_millis(500))
             .context("Failed to process dbus messages")?;
     }
@@ -1817,13 +1813,12 @@ won't take effect until you reboot the system.
             "warning: the following units failed: {}",
             failed_units.join(", ")
         );
-        _ = std::process::Command::new(new_systemd.join("bin/systemctl"))
-            .arg("status")
-            .arg("--no-pager")
-            .arg("--full")
+        std::process::Command::new(new_systemd.join("bin/systemctl"))
+            .args(["status", "--no-pager", "--full"])
             .args(failed_units)
             .spawn()
-            .map(|mut child| child.wait());
+            .map(|mut child| child.wait())
+            .ok();
 
         exit_code = 4;
     }
