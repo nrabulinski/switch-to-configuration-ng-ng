@@ -29,19 +29,25 @@ use nix::{
 use regex::Regex;
 use syslog::Facility;
 
+#[allow(non_upper_case_globals)]
+#[allow(non_camel_case_types)]
+#[allow(non_snake_case)]
+#[allow(unused)]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+#[allow(clippy::bind_instead_of_map)]
 mod systemd_manager {
-    #![allow(non_upper_case_globals)]
-    #![allow(non_camel_case_types)]
-    #![allow(non_snake_case)]
-    #![allow(unused)]
     include!(concat!(env!("OUT_DIR"), "/systemd_manager.rs"));
 }
 
+#[allow(non_upper_case_globals)]
+#[allow(non_camel_case_types)]
+#[allow(non_snake_case)]
+#[allow(unused)]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+#[allow(clippy::bind_instead_of_map)]
 mod logind_manager {
-    #![allow(non_upper_case_globals)]
-    #![allow(non_camel_case_types)]
-    #![allow(non_snake_case)]
-    #![allow(unused)]
     include!(concat!(env!("OUT_DIR"), "/logind_manager.rs"));
 }
 
