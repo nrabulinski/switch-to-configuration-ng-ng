@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{BufRead, Read, Write},
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
@@ -119,13 +119,9 @@ fn parse_os_release() -> Result<HashMap<String, String>> {
     Ok(std::fs::read_to_string("/etc/os-release")
         .context("Failed to read /etc/os-release")?
         .lines()
-        .fold(HashMap::new(), |mut acc, line| {
-            if let Some((k, v)) = line.split_once('=') {
-                acc.insert(k.to_string(), v.to_string());
-            }
-
-            acc
-        }))
+        .filter_map(|line| line.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect())
 }
 
 fn do_install_bootloader(command: &str, toplevel: &Path) -> Result<()> {
@@ -178,32 +174,22 @@ fn get_active_units(
                 id,
                 _description,
                 _load_state,
-                active_state,
-                sub_state,
+                state,
+                substate,
                 following,
                 _unit_path,
                 _job_id,
                 _job_type,
                 _job_path,
             )| {
-                if following.is_empty() && active_state != "inactive" {
-                    Some((id, active_state, sub_state))
+                if following.is_empty() && state != "inactive" {
+                    Some((id, UnitState { state, substate }))
                 } else {
                     None
                 }
             },
         )
-        .fold(HashMap::new(), |mut acc, (id, active_state, sub_state)| {
-            acc.insert(
-                id,
-                UnitState {
-                    state: active_state,
-                    substate: sub_state,
-                },
-            );
-
-            acc
-        }))
+        .collect())
 }
 
 // This function takes a single ini file that specified systemd configuration like unit
@@ -386,15 +372,12 @@ fn compare_units(current_unit: &UnitInfo, new_unit: &UnitInfo) -> UnitComparison
         .map(|name| (name, ())),
     );
 
-    let mut section_cmp = new_unit.keys().fold(HashMap::new(), |mut acc, key| {
-        acc.insert(key.as_str(), ());
-        acc
-    });
+    let mut section_cmp: HashSet<_> = new_unit.keys().map(String::as_str).collect();
 
     // Iterate over the sections
     for (section_name, section_val) in current_unit {
         // Missing section in the new unit?
-        if !section_cmp.contains_key(section_name.as_str()) {
+        if !section_cmp.contains(section_name.as_str()) {
             // If the [Unit] section was removed, make sure that only keys were in it that are
             // ignored
             if section_name == "Unit" {
@@ -412,14 +395,9 @@ fn compare_units(current_unit: &UnitInfo, new_unit: &UnitInfo) -> UnitComparison
         section_cmp.remove(section_name.as_str());
 
         // Comparison hash for the section contents
-        let mut ini_cmp = new_unit
+        let mut ini_cmp: HashSet<_> = new_unit
             .get(section_name)
-            .map(|section_val| {
-                section_val.keys().fold(HashMap::new(), |mut acc, ini_key| {
-                    acc.insert(ini_key.as_str(), ());
-                    acc
-                })
-            })
+            .map(|section_val| section_val.keys().map(String::as_str).collect())
             .unwrap_or_default();
 
         // Iterate over the keys of the section
@@ -461,7 +439,7 @@ fn compare_units(current_unit: &UnitInfo, new_unit: &UnitInfo) -> UnitComparison
         // A key was introduced that was missing in the previous unit
         if !ini_cmp.is_empty() {
             if section_name == "Unit" {
-                for (ini_key, _) in ini_cmp {
+                for ini_key in ini_cmp {
                     if ini_key == "X-Reload-Triggers" {
                         ret = UnitComparison::UnequalNeedsReload;
                     } else if unit_section_ignores.contains_key(ini_key) {
@@ -478,7 +456,7 @@ fn compare_units(current_unit: &UnitInfo, new_unit: &UnitInfo) -> UnitComparison
 
     // A section was introduced that was missing in the previous unit
     if !section_cmp.is_empty() {
-        if section_cmp.keys().len() == 1 && section_cmp.contains_key("Unit") {
+        if section_cmp.len() == 1 && section_cmp.contains("Unit") {
             if let Some(new_unit_unit) = new_unit.get("Unit") {
                 for (ini_key, _) in new_unit_unit {
                     if !unit_section_ignores.contains_key(ini_key.as_str()) {
@@ -696,11 +674,9 @@ fn map_from_list_file(p: impl AsRef<Path>) -> HashMap<String, ()> {
     std::fs::read_to_string(p)
         .unwrap_or_default()
         .lines()
-        .filter(|line| !line.is_empty())
-        .fold(HashMap::new(), |mut acc, line| {
-            acc.insert(line.to_string(), ());
-            acc
-        })
+        .filter(|&line| (!line.is_empty()))
+        .map(|line| (line.to_string(), ()))
+        .collect()
 }
 
 #[derive(Debug)]
@@ -845,10 +821,7 @@ impl std::fmt::Display for Job {
 
 fn new_dbus_proxies(
     conn: &LocalConnection,
-) -> (
-    Proxy<'_, &LocalConnection>,
-    Proxy<'_, &LocalConnection>,
-) {
+) -> (Proxy<'_, &LocalConnection>, Proxy<'_, &LocalConnection>) {
     (
         conn.with_proxy(
             "org.freedesktop.systemd1",
@@ -1186,16 +1159,16 @@ won't take effect until you reboot the system.
                     unit.as_str(),
                     "suspend.target" | "hibernate.target" | "hybrid-sleep.target"
                 ) && !(parse_systemd_bool(
-                        Some(&new_unit_info),
-                        "Unit",
-                        "RefuseManualStart",
-                        false,
-                    ) || parse_systemd_bool(
-                        Some(&new_unit_info),
-                        "Unit",
-                        "X-OnlyManualStart",
-                        false,
-                    )) {
+                    Some(&new_unit_info),
+                    "Unit",
+                    "RefuseManualStart",
+                    false,
+                ) || parse_systemd_bool(
+                    Some(&new_unit_info),
+                    "Unit",
+                    "X-OnlyManualStart",
+                    false,
+                )) {
                     units_to_start.insert(unit.to_string(), ());
                     record_unit(START_LIST_FILE, unit);
                     // Don't spam the user with target units that always get started.
