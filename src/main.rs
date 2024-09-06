@@ -484,11 +484,11 @@ fn handle_modified_unit(
     new_base_unit_file: &Path,
     new_unit_info: Option<&UnitInfo>,
     active_cur: &HashMap<String, UnitState>,
-    units_to_stop: &mut HashMap<String, ()>,
-    units_to_start: &mut HashMap<String, ()>,
-    units_to_reload: &mut HashMap<String, ()>,
-    units_to_restart: &mut HashMap<String, ()>,
-    units_to_skip: &mut HashMap<String, ()>,
+    units_to_stop: &mut HashSet<String>,
+    units_to_start: &mut HashSet<String>,
+    units_to_reload: &mut HashSet<String>,
+    units_to_restart: &mut HashSet<String>,
+    units_to_skip: &mut HashSet<String>,
 ) -> Result<()> {
     let use_restart_as_stop_and_start = new_unit_info.is_none();
 
@@ -509,10 +509,10 @@ fn handle_modified_unit(
         // means that we may not get all changes into the running system but it's better than
         // crashing it.
         if unit == "-.mount" || unit == "nix.mount" {
-            units_to_reload.insert(unit.to_string(), ());
+            units_to_reload.insert(unit.to_string());
             record_unit(RELOAD_LIST_FILE, unit);
         } else {
-            units_to_restart.insert(unit.to_string(), ());
+            units_to_restart.insert(unit.to_string());
             record_unit(RESTART_LIST_FILE, unit);
         }
     } else if unit.ends_with(".socket") {
@@ -529,20 +529,20 @@ fn handle_modified_unit(
         };
 
         if parse_systemd_bool(new_unit_info, "Service", "X-ReloadIfChanged", false)
-            && !units_to_restart.contains_key(unit)
+            && !units_to_restart.contains(unit)
             && !(if use_restart_as_stop_and_start {
-                units_to_restart.contains_key(unit)
+                units_to_restart.contains(unit)
             } else {
-                units_to_stop.contains_key(unit)
+                units_to_stop.contains(unit)
             })
         {
-            units_to_reload.insert(unit.to_string(), ());
+            units_to_reload.insert(unit.to_string());
             record_unit(RELOAD_LIST_FILE, unit);
         } else if !parse_systemd_bool(new_unit_info, "Service", "X-RestartIfChanged", true)
             || parse_systemd_bool(new_unit_info, "Unit", "RefuseManualStop", false)
             || parse_systemd_bool(new_unit_info, "Unit", "X-OnlyManualStart", false)
         {
-            units_to_skip.insert(unit.to_string(), ());
+            units_to_skip.insert(unit.to_string());
         } else {
             // It doesn't make sense to stop and start non-services because they can't have
             // ExecStop=
@@ -550,10 +550,10 @@ fn handle_modified_unit(
                 || !unit.ends_with(".service")
             {
                 // This unit should be restarted instead of stopped and started.
-                units_to_restart.insert(unit.to_string(), ());
+                units_to_restart.insert(unit.to_string());
                 record_unit(RESTART_LIST_FILE, unit);
                 // Remove from units to reload so we don't restart and reload
-                if units_to_reload.contains_key(unit) {
+                if units_to_reload.contains(unit) {
                     units_to_reload.remove(unit);
                     unrecord_unit(RELOAD_LIST_FILE, unit);
                 }
@@ -584,18 +584,18 @@ fn handle_modified_unit(
                             // We can now be sure this is a socket-activated unit
 
                             if use_restart_as_stop_and_start {
-                                units_to_restart.insert(socket.to_string(), ());
+                                units_to_restart.insert(socket.to_string());
                             } else {
-                                units_to_stop.insert(socket.to_string(), ());
+                                units_to_stop.insert(socket.to_string());
                             }
 
                             // Only restart sockets that actually exist in new configuration:
                             if toplevel.join("etc/systemd/system").join(socket).exists() {
                                 if use_restart_as_stop_and_start {
-                                    units_to_restart.insert(socket.to_string(), ());
+                                    units_to_restart.insert(socket.to_string());
                                     record_unit(RESTART_LIST_FILE, socket);
                                 } else {
-                                    units_to_start.insert(socket.to_string(), ());
+                                    units_to_start.insert(socket.to_string());
                                     record_unit(START_LIST_FILE, socket);
                                 }
 
@@ -603,7 +603,7 @@ fn handle_modified_unit(
                             }
 
                             // Remove from units to reload so we don't restart and reload
-                            if units_to_reload.contains_key(unit) {
+                            if units_to_reload.contains(unit) {
                                 units_to_reload.remove(unit);
                                 unrecord_unit(RELOAD_LIST_FILE, unit);
                             }
@@ -616,21 +616,21 @@ fn handle_modified_unit(
                 // we're interrupted.
                 if !socket_activated {
                     if use_restart_as_stop_and_start {
-                        units_to_restart.insert(unit.to_string(), ());
+                        units_to_restart.insert(unit.to_string());
                         record_unit(RESTART_LIST_FILE, unit);
                     } else {
-                        units_to_start.insert(unit.to_string(), ());
+                        units_to_start.insert(unit.to_string());
                         record_unit(START_LIST_FILE, unit);
                     }
                 }
 
                 if use_restart_as_stop_and_start {
-                    units_to_restart.insert(unit.to_string(), ());
+                    units_to_restart.insert(unit.to_string());
                 } else {
-                    units_to_stop.insert(unit.to_string(), ());
+                    units_to_stop.insert(unit.to_string());
                 }
                 // Remove from units to reload so we don't restart and reload
-                if units_to_reload.contains_key(unit) {
+                if units_to_reload.contains(unit) {
                     units_to_reload.remove(unit);
                     unrecord_unit(RELOAD_LIST_FILE, unit);
                 }
@@ -670,12 +670,12 @@ fn unrecord_unit(p: impl AsRef<Path>, unit: &str) {
     }
 }
 
-fn map_from_list_file(p: impl AsRef<Path>) -> HashMap<String, ()> {
+fn map_from_list_file(p: impl AsRef<Path>) -> HashSet<String> {
     std::fs::read_to_string(p)
         .unwrap_or_default()
         .lines()
         .filter(|&line| (!line.is_empty()))
-        .map(|line| (line.to_string(), ()))
+        .map(String::from)
         .collect()
 }
 
@@ -753,23 +753,6 @@ fn path_to_unit_name(bin_path: &Path, path: &str) -> String {
     };
 
     unit.trim().to_string()
-}
-
-// Returns a HashMap containing the same contents as the passed in `units`, minus the units in
-// `units_to_filter`.
-fn filter_units(
-    units_to_filter: &HashMap<String, ()>,
-    units: &HashMap<String, ()>,
-) -> HashMap<String, ()> {
-    let mut res = HashMap::new();
-
-    for (unit, _) in units {
-        if !units_to_filter.contains_key(unit) {
-            res.insert(unit.to_string(), ());
-        }
-    }
-
-    res
 }
 
 fn unit_is_active<'a>(conn: &LocalConnection, unit: &str) -> Result<bool> {
@@ -1031,9 +1014,9 @@ won't take effect until you reboot the system.
     let handler = SigHandler::Handler(handle_sigpipe);
     unsafe { signal::signal(Signal::SIGPIPE, handler) }.context("Failed to set SIGPIPE handler")?;
 
-    let mut units_to_stop = HashMap::new();
-    let mut units_to_skip = HashMap::new();
-    let mut units_to_filter = HashMap::new(); // units not shown
+    let mut units_to_stop = HashSet::new();
+    let mut units_to_skip = HashSet::new();
+    let mut units_to_filter = HashSet::new(); // units not shown
 
     let mut units_to_start = map_from_list_file(START_LIST_FILE);
     let mut units_to_restart = map_from_list_file(RESTART_LIST_FILE);
@@ -1146,7 +1129,7 @@ won't take effect until you reboot the system.
             {
                 let current_unit_info = parse_unit(&current_unit_file, &current_base_unit_file)?;
                 if parse_systemd_bool(Some(&current_unit_info), "Unit", "X-StopOnRemoval", true) {
-                    _ = units_to_stop.insert(unit.to_string(), ());
+                    _ = units_to_stop.insert(unit.to_string());
                 }
             } else if unit.ends_with(".target") {
                 let new_unit_info = parse_unit(&new_unit_file, &new_base_unit_file)?;
@@ -1169,11 +1152,11 @@ won't take effect until you reboot the system.
                     "X-OnlyManualStart",
                     false,
                 )) {
-                    units_to_start.insert(unit.to_string(), ());
+                    units_to_start.insert(unit.to_string());
                     record_unit(START_LIST_FILE, unit);
                     // Don't spam the user with target units that always get started.
                     if std::env::var("STC_DISPLAY_ALL_UNITS").as_deref() != Ok("1") {
-                        units_to_filter.insert(unit.to_string(), ());
+                        units_to_filter.insert(unit.to_string());
                     }
                 }
 
@@ -1191,7 +1174,7 @@ won't take effect until you reboot the system.
                     "X-StopOnReconfiguration",
                     false,
                 ) {
-                    units_to_stop.insert(unit.to_string(), ());
+                    units_to_stop.insert(unit.to_string());
                 }
             } else {
                 let current_unit_info = parse_unit(&current_unit_file, &current_base_unit_file)?;
@@ -1213,8 +1196,8 @@ won't take effect until you reboot the system.
                             &mut units_to_skip,
                         )?;
                     }
-                    UnitComparison::UnequalNeedsReload if !units_to_restart.contains_key(unit) => {
-                        units_to_reload.insert(unit.clone(), ());
+                    UnitComparison::UnequalNeedsReload if !units_to_restart.contains(unit) => {
+                        units_to_reload.insert(unit.clone());
                         record_unit(RELOAD_LIST_FILE, unit);
                     }
                     _ => {}
@@ -1244,25 +1227,25 @@ won't take effect until you reboot the system.
                 if matches!(mountpoint.as_str(), "/" | "/nix") {
                     if current_filesystem.options != new_filesystem.options {
                         // Mount options changes, so remount it.
-                        units_to_reload.insert(unit.to_string(), ());
+                        units_to_reload.insert(unit.to_string());
                         record_unit(RELOAD_LIST_FILE, &unit)
                     } else {
                         // Don't unmount / or /nix if the device changed
-                        units_to_skip.insert(unit, ());
+                        units_to_skip.insert(unit);
                     }
                 } else {
                     // Filesystem type or device changed, so unmount and mount it.
-                    units_to_restart.insert(unit.to_string(), ());
+                    units_to_restart.insert(unit.to_string());
                     record_unit(RESTART_LIST_FILE, &unit);
                 }
             } else if current_filesystem.options != new_filesystem.options {
                 // Mount options changes, so remount it.
-                units_to_reload.insert(unit.to_string(), ());
+                units_to_reload.insert(unit.to_string());
                 record_unit(RELOAD_LIST_FILE, &unit)
             }
         } else {
             // Filesystem entry disappeared, so unmount it.
-            units_to_stop.insert(unit, ());
+            units_to_stop.insert(unit);
         }
     }
 
@@ -1304,24 +1287,18 @@ won't take effect until you reboot the system.
     let restart_systemd = current_pid1_path != new_pid1_path
         || current_systemd_system_config != new_systemd_system_config;
 
-    let units_to_stop_filtered = filter_units(&units_to_filter, &units_to_stop);
+    let mut units_to_stop_filtered = units_to_stop.difference(&units_to_filter).peekable();
 
     // Show dry-run actions.
     if *action == Action::DryActivate {
-        if !units_to_stop_filtered.is_empty() {
-            let mut units = units_to_stop_filtered
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<&str>>();
+        if units_to_stop_filtered.peek().is_some() {
+            let mut units: Vec<_> = units_to_stop_filtered.map(String::as_str).collect();
             units.sort_by_key(|name| name.to_lowercase());
             eprintln!("would stop the following units: {}", units.join(", "));
         }
 
         if !units_to_skip.is_empty() {
-            let mut units = units_to_skip
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<&str>>();
+            let mut units: Vec<_> = units_to_skip.iter().map(String::as_str).collect();
             units.sort_by_key(|name| name.to_lowercase());
             eprintln!(
                 "would NOT stop the following changed units: {}",
@@ -1370,7 +1347,7 @@ won't take effect until you reboot the system.
 
             // Start units if they were not active previously
             if !current_active_units.contains_key(unit) {
-                units_to_start.insert(unit.to_string(), ());
+                units_to_start.insert(unit.to_string());
                 continue;
             }
 
@@ -1398,10 +1375,10 @@ won't take effect until you reboot the system.
             .lines()
         {
             if current_active_units.contains_key(unit)
-                && !units_to_restart.contains_key(unit)
-                && !units_to_stop.contains_key(unit)
+                && !units_to_restart.contains(unit)
+                && !units_to_stop.contains(unit)
             {
-                units_to_reload.insert(unit.to_string(), ());
+                units_to_reload.insert(unit.to_string());
                 record_unit(RELOAD_LIST_FILE, unit);
             }
         }
@@ -1414,29 +1391,20 @@ won't take effect until you reboot the system.
         }
 
         if !units_to_reload.is_empty() {
-            let mut units = units_to_reload
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<&str>>();
+            let mut units: Vec<_> = units_to_reload.iter().map(String::as_str).collect();
             units.sort_by_key(|name| name.to_lowercase());
             eprintln!("would reload the following units: {}", units.join(", "));
         }
 
         if !units_to_restart.is_empty() {
-            let mut units = units_to_restart
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<&str>>();
+            let mut units: Vec<_> = units_to_restart.iter().map(String::as_str).collect();
             units.sort_by_key(|name| name.to_lowercase());
             eprintln!("would restart the following units: {}", units.join(", "));
         }
 
-        let units_to_start_filtered = filter_units(&units_to_filter, &units_to_start);
-        if !units_to_start_filtered.is_empty() {
-            let mut units = units_to_start_filtered
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<&str>>();
+        let mut units_to_start_filtered = units_to_start.difference(&units_to_filter).peekable();
+        if units_to_start_filtered.peek().is_some() {
+            let mut units: Vec<_> = units_to_start_filtered.map(String::as_str).collect();
             units.sort_by_key(|name| name.to_lowercase());
             eprintln!("would start the following units: {}", units.join(", "));
         }
@@ -1447,16 +1415,13 @@ won't take effect until you reboot the system.
     log::info!("switching to system configuration {}", toplevel.display());
 
     if !units_to_stop.is_empty() {
-        if !units_to_stop_filtered.is_empty() {
-            let mut units = units_to_stop_filtered
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<&str>>();
+        if units_to_stop_filtered.peek().is_some() {
+            let mut units: Vec<_> = units_to_stop_filtered.map(String::as_str).collect();
             units.sort_by_key(|name| name.to_lowercase());
             eprintln!("stopping the following units: {}", units.join(", "));
         }
 
-        for unit in units_to_stop.keys() {
+        for unit in units_to_stop.iter() {
             match systemd.stop_unit(unit, "replace") {
                 Ok(job_path) => {
                     let mut j = submitted_jobs.borrow_mut();
@@ -1470,10 +1435,7 @@ won't take effect until you reboot the system.
     }
 
     if !units_to_skip.is_empty() {
-        let mut units = units_to_skip
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<&str>>();
+        let mut units: Vec<_> = units_to_skip.iter().map(String::as_str).collect();
         units.sort_by_key(|name| name.to_lowercase());
         eprintln!(
             "NOT restarting the following changed units: {}",
@@ -1537,7 +1499,7 @@ won't take effect until you reboot the system.
 
         // Start units if they were not active previously
         if !current_active_units.contains_key(unit) {
-            units_to_start.insert(unit.to_string(), ());
+            units_to_start.insert(unit.to_string());
             record_unit(START_LIST_FILE, unit);
             continue;
         }
@@ -1567,10 +1529,10 @@ won't take effect until you reboot the system.
         .lines()
     {
         if current_active_units.contains_key(unit)
-            && !units_to_restart.contains_key(unit)
-            && !units_to_stop.contains_key(unit)
+            && !units_to_restart.contains(unit)
+            && !units_to_stop.contains(unit)
         {
-            units_to_reload.insert(unit.to_string(), ());
+            units_to_reload.insert(unit.to_string());
             record_unit(RELOAD_LIST_FILE, unit);
         }
     }
@@ -1674,7 +1636,7 @@ won't take effect until you reboot the system.
     // deactivated because one of their requirements got stopped. If they are inactive but should
     // have been reloaded, the user probably expects them to be started.
     if !units_to_reload.is_empty() {
-        for (unit, _) in units_to_reload.clone() {
+        for unit in units_to_reload.clone() {
             if !unit_is_active(&dbus_conn, &unit)? {
                 // Figure out if we need to start the unit
                 let unit_info = parse_unit(
@@ -1684,7 +1646,7 @@ won't take effect until you reboot the system.
                 if !parse_systemd_bool(Some(&unit_info), "Unit", "RefuseManualStart", false)
                     || parse_systemd_bool(Some(&unit_info), "Unit", "X-OnlyManualStart", false)
                 {
-                    units_to_start.insert(unit.clone(), ());
+                    units_to_start.insert(unit.clone());
                     record_unit(START_LIST_FILE, &unit);
                 }
                 // Don't reload the unit, reloading would fail
@@ -1696,10 +1658,7 @@ won't take effect until you reboot the system.
 
     // Reload units that need it. This includes remounting changed mount units.
     if !units_to_reload.is_empty() {
-        let mut units = units_to_reload
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<&str>>();
+        let mut units: Vec<_> = units_to_reload.iter().map(String::as_str).collect();
         units.sort_by_key(|name| name.to_lowercase());
         eprintln!("reloading the following units: {}", units.join(", "));
 
@@ -1725,10 +1684,7 @@ won't take effect until you reboot the system.
 
     // Restart changed services (those that have to be restarted rather than stopped and started).
     if !units_to_restart.is_empty() {
-        let mut units = units_to_restart
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<&str>>();
+        let mut units: Vec<_> = units_to_restart.iter().map(String::as_str).collect();
         units.sort_by_key(|name| name.to_lowercase());
         eprintln!("restarting the following units: {}", units.join(", "));
 
@@ -1755,18 +1711,15 @@ won't take effect until you reboot the system.
     // because some may not be dependencies of the targets (i.e., they were manually started).
     // FIXME: detect units that are symlinks to other units.  We shouldn't start both at the same
     // time because we'll get a "Failed to add path to set" error from systemd.
-    let units_to_start_filtered = filter_units(&units_to_filter, &units_to_start);
-    if !units_to_start_filtered.is_empty() {
-        let mut units = units_to_start_filtered
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<&str>>();
+    let mut units_to_start_filtered = units_to_start.difference(&units_to_filter).peekable();
+    if units_to_start_filtered.peek().is_some() {
+        let mut units: Vec<_> = units_to_start_filtered.map(String::as_str).collect();
         units.sort_by_key(|name| name.to_lowercase());
         eprintln!("starting the following units: {}", units.join(", "));
     }
 
-    for unit in units_to_start.keys() {
-        match systemd.start_unit(unit, "replace") {
+    for unit in units_to_start {
+        match systemd.start_unit(&unit, "replace") {
             Ok(job_path) => {
                 let mut jobs = submitted_jobs.borrow_mut();
                 jobs.insert(job_path, Job::Start);
@@ -1955,22 +1908,6 @@ invalid
             assert_eq!(home_fs.device, "/dev/disk/by-partlabel/home");
             assert_eq!(home_fs.options, "defaults");
         }
-    }
-
-    #[test]
-    fn filter_units() {
-        assert_eq!(
-            super::filter_units(&HashMap::from([]), &HashMap::from([])),
-            HashMap::from([])
-        );
-
-        assert_eq!(
-            super::filter_units(
-                &HashMap::from([("foo".to_string(), ())]),
-                &HashMap::from([("foo".to_string(), ()), ("bar".to_string(), ())])
-            ),
-            HashMap::from([("bar".to_string(), ())])
-        );
     }
 
     #[test]
