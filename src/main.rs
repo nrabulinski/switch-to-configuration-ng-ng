@@ -385,7 +385,7 @@ fn compare_units(current_unit: &UnitInfo, new_unit: &UnitInfo) -> UnitComparison
             // If the [Unit] section was removed, make sure that only keys were in it that are
             // ignored
             if section_name == "Unit" {
-                for (ini_key, _ini_val) in section_val {
+                for ini_key in section_val.keys() {
                     if !unit_section_ignores.contains_key(ini_key.as_str()) {
                         return UnitComparison::UnequalNeedsRestart;
                     }
@@ -462,7 +462,7 @@ fn compare_units(current_unit: &UnitInfo, new_unit: &UnitInfo) -> UnitComparison
     if !section_cmp.is_empty() {
         if section_cmp.len() == 1 && section_cmp.contains("Unit") {
             if let Some(new_unit_unit) = new_unit.get("Unit") {
-                for (ini_key, _) in new_unit_unit {
+                for ini_key in new_unit_unit.keys() {
                     if !unit_section_ignores.contains_key(ini_key.as_str()) {
                         return UnitComparison::UnequalNeedsRestart;
                     } else if ini_key == "X-Reload-Triggers" {
@@ -480,6 +480,7 @@ fn compare_units(current_unit: &UnitInfo, new_unit: &UnitInfo) -> UnitComparison
 
 // Called when a unit exists in both the old systemd and the new system and the units differ. This
 // figures out of what units are to be stopped, restarted, reloaded, started, and skipped.
+#[allow(clippy::too_many_arguments)]
 fn handle_modified_unit(
     toplevel: &Path,
     unit: &str,
@@ -753,7 +754,7 @@ fn path_to_unit_name(bin_path: &Path, path: &str) -> String {
     unit.trim().to_string()
 }
 
-fn unit_is_active<'a>(conn: &LocalConnection, unit: &str) -> Result<bool> {
+fn unit_is_active(conn: &LocalConnection, unit: &str) -> Result<bool> {
     let unit_object_path = conn
         .with_proxy(
             "org.freedesktop.systemd1",
@@ -1138,17 +1139,17 @@ won't take effect until you reboot the system.
                 if !matches!(
                     unit.as_str(),
                     "suspend.target" | "hibernate.target" | "hybrid-sleep.target"
-                ) && !(parse_systemd_bool(
+                ) && !parse_systemd_bool(
                     Some(&new_unit_info),
                     "Unit",
                     "RefuseManualStart",
                     false,
-                ) || parse_systemd_bool(
+                ) && !parse_systemd_bool(
                     Some(&new_unit_info),
                     "Unit",
                     "X-OnlyManualStart",
                     false,
-                )) {
+                ) {
                     units_to_start.insert(unit.to_string());
                     record_unit(START_LIST_FILE, unit);
                     // Don't spam the user with target units that always get started.
@@ -1248,7 +1249,7 @@ won't take effect until you reboot the system.
 
     // Also handles swap devices.
     for (device, _) in current_swaps {
-        if new_swaps.get(&device).is_none() {
+        if new_swaps.contains_key(&device) {
             // Swap entry disappeared, so turn it off.  Can't use "systemctl stop" here because
             // systemd has lots of alias units that prevent a stop from actually calling "swapoff".
             if *action == Action::DryActivate {
@@ -1420,12 +1421,9 @@ won't take effect until you reboot the system.
         }
 
         for unit in units_to_stop.iter() {
-            match systemd.stop_unit(unit, "replace") {
-                Ok(job_path) => {
-                    let mut j = submitted_jobs.borrow_mut();
-                    j.insert(job_path.to_owned(), Job::Stop);
-                }
-                Err(_) => {}
+            if let Ok(job_path) = systemd.stop_unit(unit, "replace") {
+                let mut j = submitted_jobs.borrow_mut();
+                j.insert(job_path.to_owned(), Job::Stop);
             };
         }
 
