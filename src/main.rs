@@ -1,6 +1,8 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
+    ffi::OsStr,
+    fs::read_dir,
     io::{BufRead, Read, Write},
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
@@ -15,7 +17,6 @@ use dbus::{
     blocking::{stdintf::org_freedesktop_dbus::Properties, LocalConnection, Proxy},
     Message,
 };
-use glob::glob;
 use ini::{Ini, ParseOption};
 use log::LevelFilter;
 use nix::{
@@ -268,6 +269,13 @@ fn parse_systemd_ini(data: &mut UnitInfo, mut unit_file: impl Read) -> Result<()
     Ok(())
 }
 
+fn get_unit_dir_entries(unit_path: &Path) -> Result<impl Iterator<Item = PathBuf>> {
+    Ok(read_dir(format!("{}.d", unit_path.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|entry| entry.extension() == Some(OsStr::new("conf"))))
+}
+
 // This function takes the path to a systemd configuration file (like a unit configuration) and
 // parses it into a UnitInfo structure.
 //
@@ -286,13 +294,7 @@ fn parse_unit(unit_file: &Path, base_unit_path: &Path) -> Result<UnitInfo> {
         )
     })?;
 
-    for entry in
-        glob(&format!("{}.d/*.conf", base_unit_path.display())).context("Invalid glob pattern")?
-    {
-        let Ok(entry) = entry else {
-            continue;
-        };
-
+    for entry in get_unit_dir_entries(base_unit_path)? {
         let unit_file = std::fs::File::open(&entry)
             .with_context(|| format!("Failed to open unit file {}", entry.display()))?;
         parse_systemd_ini(&mut unit_data, unit_file)?;
@@ -300,13 +302,7 @@ fn parse_unit(unit_file: &Path, base_unit_path: &Path) -> Result<UnitInfo> {
 
     // Handle drop-in template-unit instance overrides
     if unit_file != base_unit_path {
-        for entry in
-            glob(&format!("{}.d/*.conf", unit_file.display())).context("Invalid glob pattern")?
-        {
-            let Ok(entry) = entry else {
-                continue;
-            };
-
+        for entry in get_unit_dir_entries(unit_file)? {
             let unit_file = std::fs::File::open(&entry)
                 .with_context(|| format!("Failed to open unit file {}", entry.display()))?;
             parse_systemd_ini(&mut unit_data, unit_file)?;
